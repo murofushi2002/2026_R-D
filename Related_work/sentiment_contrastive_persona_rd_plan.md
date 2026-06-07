@@ -4,7 +4,7 @@
 > 作成日: 2026年6月3日  
 > バージョン: v1.0  
 > 研究名称（仮）: **SentiPersona-Airbnb**: Sentiment-Contrastive Guest Persona Discovery and Occupancy Analysis  
-> データセット: Inside Airbnb（最新1年分）  
+> データセット: Inside Airbnb（最新3か月分を標準実験窓とする）  
 > 実行環境方針: OSS BERTモデル + ローカルLLM完結
 
 ---
@@ -21,10 +21,11 @@ Inside Airbnb reviews（英語口コミ）
         │
         ▼
 [Step 2] 感情Contrastive BERT Fine-tune（SentiCSE方式）
-         TripAdvisor口コミ（Kaggle, 515K件, 1〜5星付き）を教師データとして使用
-         同感情ペアを正例、異感情ペアを負例として
+         Airbnb口コミにOSS感情分類モデルを適用し、positive/negative疑似ラベルを付与
+         高信頼サンプルのみを採用し、positive=1 / negative=0 の2値で追加学習
+         同極性ペアを正例、異極性ペアを負例として
          感情極性軸でembedding空間を整形
-         → Fine-tune済みモデルをInside Airbnbに適用して推論
+         → Fine-tune済みモデルで全Airbnb口コミをembedding化
         │
         ▼
 [Step 3] Contrastive Embeddingによるクラスタリング
@@ -48,7 +49,7 @@ Inside Airbnb reviews（英語口コミ）
 
 ### 1.2 研究目的
 
-1. **地域ペルソナ発見**: 特定都市・地域のAirbnb口コミ全体から、感情軸で整形されたembedding空間によりデータドリブンにゲストペルソナを発見する
+1. **地域ペルソナ発見**: 特定都市・地域のAirbnb全口コミから、感情軸で整形されたembedding空間によりデータドリブンにゲストペルソナを発見する
 2. **施設ペルソナ発見**: 個別施設の口コミから施設固有のペルソナを構築し、地域ペルソナとのギャップを分析する
 3. **稼働率との関係解明**: ペルソナ構成比率の時系列変化と施設稼働率（代理指標）の統計的因果関係を実証する
 
@@ -81,19 +82,24 @@ Inside Airbnb reviews（英語口コミ）
 | `listings.csv.gz` | 施設情報・稼働率代理指標 | `id`, `neighbourhood_cleansed`, `room_type`, `price`, `availability_365`, `number_of_reviews_ltm`, `review_scores_*` |
 | `calendar.csv.gz` | 日次空き状況（稼働率詳細計算用） | `listing_id`, `date`, `available`, `price` |
 
-### 2.2 TripAdvisor Hotel Reviews — SentiCSE Fine-tune用教師データ
+### 2.2 Airbnb内疑似ラベル — SentiCSE Fine-tune用教師データ
 
-**URL**: https://www.kaggle.com/datasets/andrewmvd/trip-advisor-hotel-reviews  
-**ライセンス**: CC BY-NC（研究利用可）  
-**件数**: 515,000件  
-**ラベル**: per-review の星評価（1〜5）= 人間による実際の評価
+外部口コミデータセットは使わず、Inside Airbnb の `reviews.csv.gz` から fine-tune 用データを構築する。
+追加学習では `data.finetune_review_window_months: 3` により、レビュー投稿日ベースで最新3か月のカレンダー月だけを teacher data として採用する。本番の embedding、clustering、persona、評価は前処理済みの全Airbnb口コミで行う。
 
-> Inside Airbnbの`comments`にはラベルが存在しないため、同じホテルドメインのTripAdvisorデータでSentiCSE Fine-tuneを行い、Fine-tune済みモデルをInside Airbnbの推論に適用する。モデル予測ラベルを使うnlptownアプローチと比べて、人間評価ラベルによる高品質な教師データが得られる。
+**入力**: `comments_clean`（前処理・言語フィルタ後のAirbnb口コミ）  
+**ラベル生成**: OSS感情分類モデルによる per-review binary sentiment  
+**ラベル定義**: `positive=1`, `negative=0`  
+**採用基準**: confidence が閾値以上（例: `0.95`）の高信頼サンプルのみ  
+
+> これにより、ホテル系外部データからAirbnbへのドメインシフトを避ける。ラベルは疑似ラベルであるため、低信頼サンプルを除外し、positive/negative のクラスバランスを揃えたうえで supervised contrastive fine-tune を行う。
 
 | カラム | 内容 |
 |--------|------|
-| `Review` | 口コミテキスト（英語） |
-| `Rating` | 1〜5の星評価（per-review） |
+| `text` | Airbnb口コミ本文（cleaned comments） |
+| `sentiment` | `positive` / `negative` |
+| `label_id` | `positive=1`, `negative=0` |
+| `sentiment_score` | 感情分類モデルの confidence |
 
 #### 稼働率の計算（calendarから直接計算）
 
@@ -127,8 +133,9 @@ monthly_occ = (
 
 | 項目 | 東京の場合 | 備考 |
 |------|----------|------|
-| listings数 | 約10,000〜15,000件 | 1年分スナップショット |
-| reviews数（1年分） | 約50,000〜100,000件 | `number_of_reviews_ltm`から推定 |
+| listings数 | 約10,000〜15,000件 | Inside Airbnb スナップショット |
+| reviews数（本番） | 都市・時期に依存。全履歴レビューを想定 | `airbnb_reviews_clean_all.parquet` |
+| reviews数（fine-tune） | 都市・時期に依存。最新3か月の数万件規模を想定 | `finetune_review_window_months: 3` で制御 |
 | calendar行数 | 約300万行 | listings数 × 365日 |
 | embedding対象 | reviews.comments（非空） | 平均150〜300単語/件 |
 
@@ -161,33 +168,46 @@ monthly_occ = (
 
 ### 3.2 SentiCSE方式Fine-tune — 実装詳細
 
-#### 3.2.1 教師データの構築（TripAdvisor Kaggle データ）
+#### 3.2.1 教師データの構築（Airbnb疑似ラベル）
 
-SentiCSEのFine-tuneにはper-reviewの感情ラベルが必要。TripAdvisor Hotel Reviews（515K件、1〜5星付き）をKaggleからダウンロードし、星評価をPosision/Neutral/Negativeに変換する。
+SentiCSEのFine-tuneにはper-reviewの感情ラベルが必要。外部データは使わず、Airbnb口コミにOSS感情分類モデルを適用し、高信頼なpositive/negativeだけを教師データ化する。
 
 ```python
 import pandas as pd
+from transformers import pipeline
 
-# TripAdvisor Kaggle データ読み込み
-# https://www.kaggle.com/datasets/andrewmvd/trip-advisor-hotel-reviews
-ta = pd.read_csv('tripadvisor_hotel_reviews.csv')  # カラム: Review, Rating
+reviews = pd.read_parquet('data/processed/airbnb_reviews_finetune_window.parquet')
 
-def stars_to_sentiment(rating: int) -> str:
-    if rating >= 4:
-        return 'positive'
-    elif rating == 3:
-        return 'neutral'
-    else:
-        return 'negative'
+classifier = pipeline(
+    "text-classification",
+    model="distilbert-base-uncased-finetuned-sst-2-english",
+    truncation=True,
+    max_length=256,
+)
 
-ta['sentiment_label'] = ta['Rating'].apply(stars_to_sentiment)
-train_df = ta[['Review', 'sentiment_label']].rename(columns={'Review': 'comments'})
+predictions = classifier(reviews["comments_clean"].tolist(), batch_size=64)
 
-print(train_df['sentiment_label'].value_counts())
-# positive: ~350K, neutral: ~70K, negative: ~95K（概算）
+def to_binary_label(pred):
+    label = pred["label"].lower()
+    if label == "positive":
+        return 1
+    if label == "negative":
+        return 0
+    return None
+
+reviews["label_id"] = [to_binary_label(p) for p in predictions]
+reviews["sentiment_score"] = [p["score"] for p in predictions]
+
+train_df = (
+    reviews
+    .dropna(subset=["label_id"])
+    .query("sentiment_score >= 0.95")
+    [["comments_clean", "label_id", "sentiment_score"]]
+    .rename(columns={"comments_clean": "text"})
+)
 ```
 
-> Fine-tune済みモデルは、Inside Airbnb の `reviews.csv` の `comments` に対して推論のみを行う（ラベルなしデータに適用）。
+> 疑似ラベルはノイズを含むため、confidence閾値、重複除去、positive/negativeのバランスサンプリングを必須とする。中立・曖昧サンプルはfine-tuneには使わず、後段のembedding対象には残す。
 
 #### 3.2.2 Contrastiveペアの生成
 
@@ -195,12 +215,12 @@ print(train_df['sentiment_label'].value_counts())
 import random
 from itertools import combinations
 
-def build_contrastive_pairs(df: pd.DataFrame, n_pairs: int = 50000):
+def build_contrastive_pairs(df: pd.DataFrame, n_pairs: int = 10000):
     """感情ラベルを基準に正例・負例ペアを生成"""
     pos_pairs = []   # 同極性ペア
     neg_pairs = []   # 異極性ペア
 
-    by_sentiment = df.groupby('sentiment_label')['comments'].apply(list).to_dict()
+    by_sentiment = df.groupby('label_id')['text'].apply(list).to_dict()
 
     sentiments = list(by_sentiment.keys())
 
@@ -759,19 +779,20 @@ Phase 0: 環境構築・データ収集（1〜2週間）
 Phase 1: データ前処理・感情ラベリング（2〜3週間）
   □ reviews.csv + listings.csv のマージ
   □ calendar.csv からの月次稼働率計算
-  □ 既存感情モデルによる口コミ事前ラベル付け
-  □ ラベル分布確認（Positive/Neutral/Negativeのバランス）
-  □ Contrastiveペア生成（10万ペア目安）
+  □ OSS感情モデルによるAirbnb口コミのpositive/negative疑似ラベル付け
+  □ confidence閾値による低信頼サンプル除外
+  □ ラベル分布確認（positive=1 / negative=0 のバランス）
+  □ Contrastiveペア生成またはBalancedSampler適用
 
 Phase 2: SentiCSE Fine-tune（1〜2週間）
   □ SentiCSEモデルの実装・動作確認
   □ 小規模データ（1000ペア）で動作テスト
-  □ 全データでFine-tune実行（GPU必須）
+  □ 最新3か月データでFine-tune実行（GPU推奨）
   □ SgTS評価指標による品質確認
   □ チェックポイント保存
 
 Phase 3: 地域ペルソナ構築（1〜2週間）
-  □ 全口コミのembedding生成（fine-tunedモデル）
+  □ 全Airbnb口コミのembedding生成（fine-tunedモデル）
   □ UMAP（50次元・2次元）実行
   □ HDBSCAN クラスタリング・パラメータ調整
   □ シルエット係数によるクラスタ品質評価

@@ -1,0 +1,44 @@
+experiment:
+  name: smoke
+  seed: 42
+paths:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+  models_dir: models
+  reports_dir: reports
+  artifacts_dir: artifacts
+data:
+  target_city: Smoke
+  city_slug: smoke
+  target_language: null
+  finetune_review_window_months: null
+  finetune_review_window_end: latest
+  sentiment_eval_review_window_months: null
+  sentiment_eval_review_window_end: before_finetune
+sentiment_labeling:
+  model_name: models/finetune
+  batch_size: 4
+  max_length: 64
+  min_confidence: 0.50
+  max_labeled_reviews: 24
+  max_eval_labeled_reviews: 24
+  balance_classes: true
+  max_per_class: 8
+  balance_eval_classes: true
+  max_eval_per_class: 8
+training:
+  base_model: models/sentense
+  batch_size: 4
+  epochs: 1
+  max_train_samples: 24
+model_evaluation:
+  max_samples_per_class: 8
+clustering:
+  n_components_cluster: 5
+  n_components_vis: 2
+  n_neighbors: 5
+  min_cluster_size_ratio: 0.10
+persona:
+  ollama_model: qwen3:4b
+  repetitions: 1
